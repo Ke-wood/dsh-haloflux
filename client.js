@@ -724,8 +724,7 @@ window.__ModuleLoader__.load({
           return a * o * (0.85 + 0.15 * Math.sin(h.age * 30));
         }
         function drawStrands(Lr, collect) {
-          const span = RMAX - RO - 20, r0 = RO + 3;
-          const rotA = ringRot * Lr.rotK + Lr.off + revOut() * (Lr.revK === undefined ? 0.5 : Lr.revK);
+          const span = RMAX - RO - 20, r0 = RO + 3, rotA = strandRot(Lr);
           S.lineCap = 'butt';
           for (const w of Lr.wedges) {
             if (!w.vis) continue;
@@ -1368,7 +1367,7 @@ window.__ModuleLoader__.load({
             if (p.life <= 0) pulses.splice(i, 1);
           }
           for (const Lr of strandLayers) {
-            const rotA = ringRot * Lr.rotK + Lr.off;
+            const rotA = strandRot(Lr);
             for (const w of Lr.wedges) {
               const am = normA((w.i0 + w.n / 2) * Lr.step + rotA);
               w.vis = Math.abs(am) < thS + 0.2;
@@ -1763,8 +1762,11 @@ window.__ModuleLoader__.load({
           const k = Math.min(1, spin.t / spin.dur);
           spinOffset = spin.from + (spin.to - spin.from) * easeIO(k);
           if (k >= 1) {
-            // whole turns are visually identical to zero → drop them, no position jump
-            spinOffset = spin.to - Math.round(spin.to / TAU) * TAU;
+            // whole turns are visually identical to zero for the ring; the outer field
+            // keeps its own share of them, so bake that share into the layer angles first
+            const removed = Math.round(spin.to / TAU) * TAU;
+            spinOffset = spin.to - removed;
+            bakeOuterSpin(removed);
             spin = null;
           }
         }
@@ -1772,6 +1774,13 @@ window.__ModuleLoader__.load({
         /** how far the outer light field follows the ring's one-shot revolve */
         function revOut() {
           return spinOffset * clamp(num(C.revolveOuter, 1), 0, 1);
+        }
+        /** One layer's current base angle: slow drift + its share of the one-shot revolve.
+            updateOuter (visibility) and drawStrands (drawing) MUST use the same value;
+            when they drift apart a wedge is culled as "off screen" while it is visibly
+            rotating through the cone, which reads as strips disappearing and reappearing. */
+        function strandRot(Lr) {
+          return ringRot * Lr.rotK + Lr.off + revOut() * (Lr.revK === undefined ? 0.5 : Lr.revK);
         }
         /** 0..1 progress of the switch window, -1 when idle */
         function switchU() { return switchT < 0 ? -1 : clamp(switchT / switchDur, 0, 1); }
@@ -1785,6 +1794,21 @@ window.__ModuleLoader__.load({
           switchT += dt;
           if (switchT >= switchDur) switchT = -1;
         }
+        /** Whole turns are dropped from spinOffset at the end of a revolve; the ring is
+            2π-periodic but the outer field only follows it by a fraction, so hand the
+            removed amount to each element's own base angle to keep the transition seamless. */
+        function bakeOuterSpin(turns) {
+          const gain = clamp(num(C.revolveOuter, 1), 0, 1);
+          if (gain <= 0 || !isFinite(turns) || turns === 0) return;
+          const shift = (k) => turns * gain * k;
+          for (const Lr of strandLayers) {
+            if (!Lr) continue;
+            Lr.off = normA(Lr.off + shift(Lr.revK === undefined ? 0.5 : Lr.revK));
+          }
+          for (const h of hazes) h.a = normA(h.a + shift(0.4));
+          for (const f of flyers) f.a = normA(f.a + shift(0.85));
+        }
+
         /** start the switch window: reveal, brightness pulse, colour sweep, camera punch */
         function switchFx(dur) {
           if (disposed) return;
@@ -1885,6 +1909,19 @@ window.__ModuleLoader__.load({
             params: { ...C },
             /* extras, not part of the contract */
             switchT, switchDur, outerRev: spinOffset * clamp(num(C.revolveOuter, 1), 0, 1),
+            outerBase: strandLayers[0]
+              ? { off: strandLayers[0].off, revK: strandLayers[0].revK, rotK: strandLayers[0].rotK }
+              : null,
+            visMismatch: (() => {
+              let n = 0;
+              for (const Lr of strandLayers) {
+                for (const w of Lr.wedges) {
+                  const am = normA((w.i0 + w.n / 2) * Lr.step + strandRot(Lr));
+                  if (w.vis !== (Math.abs(am) < thS + 0.2)) n++;
+                }
+              }
+              return n;
+            })(),
             target: !present ? clamp(num(C.voidLevel, 0), 0, 1)
               : (sessRunning ? clamp(num(C.runLevel, 1), 0.2, 2) : clamp(num(C.idleMotion, 0), 0, 1)),
             build: bld, activity: act, spinning: !!spin, loopRunning: running,
@@ -3932,6 +3969,9 @@ window.__ModuleLoader__.load({
       const PARAMS_KEY = 'dsh-haloflux:params:default:v2';
       /** a Session switch can report "no main session" for a frame or two: never collapse inside it */
       const SWITCH_GRACE_MS = 1200;
+      /** a stale "idle" right after a switch is held off only briefly, so a running -> idle
+          switch starts dimming WITH the turn instead of spinning at full brightness first */
+      const SWITCH_SETTLE_MS = 260;
 
       const DICT = {
         en: {
@@ -4211,9 +4251,10 @@ window.__ModuleLoader__.load({
           if (!present) return undefined;
           if (typeof running !== 'boolean') return undefined;
           if (running === false) {
-            // A freshly opened Session may project running=false before its own status
-            // arrives; never drop the level inside the switch window.
-            const left = SWITCH_GRACE_MS - (Date.now() - switchAtRef.current);
+            // A freshly opened Session may project running=false for a beat before its
+            // own status arrives; hold it off briefly, then let the release overlap the
+            // turn so the light drains while the ring is still moving.
+            const left = SWITCH_SETTLE_MS - (Date.now() - switchAtRef.current);
             if (left > 0) {
               const timer = setTimeout(() => { live.setRunning(false); }, left);
               return () => { clearTimeout(timer); };

@@ -8,6 +8,9 @@ const HalofluxPlugin = (() => {
   const PARAMS_KEY = 'dsh-haloflux:params:default:v2';
   /** a Session switch can report "no main session" for a frame or two: never collapse inside it */
   const SWITCH_GRACE_MS = 1200;
+  /** a stale "idle" right after a switch is held off only briefly, so a running -> idle
+      switch starts dimming WITH the turn instead of spinning at full brightness first */
+  const SWITCH_SETTLE_MS = 260;
 
   const DICT = {
     en: {
@@ -287,9 +290,10 @@ const HalofluxPlugin = (() => {
       if (!present) return undefined;
       if (typeof running !== 'boolean') return undefined;
       if (running === false) {
-        // A freshly opened Session may project running=false before its own status
-        // arrives; never drop the level inside the switch window.
-        const left = SWITCH_GRACE_MS - (Date.now() - switchAtRef.current);
+        // A freshly opened Session may project running=false for a beat before its
+        // own status arrives; hold it off briefly, then let the release overlap the
+        // turn so the light drains while the ring is still moving.
+        const left = SWITCH_SETTLE_MS - (Date.now() - switchAtRef.current);
         if (left > 0) {
           const timer = setTimeout(() => { live.setRunning(false); }, left);
           return () => { clearTimeout(timer); };
