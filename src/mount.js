@@ -243,8 +243,10 @@ const HalofluxPlugin = (() => {
       prevSessionRef.current = sessionId;
       if (previous === undefined || previous === sessionId) return;
       switchAtRef.current = Date.now();
-      if (!(params.revolveOnSwitch >= 0.5)) return;
       const engine = engineRef.current;
+      // the non-revolve switch effects run even when the ring spin is disabled
+      if (engine && typeof engine.switchFx === 'function') engine.switchFx();
+      if (!(params.revolveOnSwitch >= 0.5)) return;
       if (engine && typeof engine.revolve === 'function') engine.revolve(1);
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [sessionId]);

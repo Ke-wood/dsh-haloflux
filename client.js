@@ -145,6 +145,12 @@ window.__ModuleLoader__.load({
         ['revolveOnSwitch', '切换会话整圈', 0, 1, 1, '插件'],
         ['revolveMs', '整圈用时(ms)', 300, 4000, 50, '插件'],
         ['easeCurve', '过渡曲线(0线性1平滑2更缓)', 0, 2, 1, '插件'],
+        /* ---- round 4: session-switch effects (each independently switchable) ---- */
+        ['revolveOuter', '切换：外圈光束跟随转 (0关 1开)', 0, 1, 1, '插件'],
+        ['switchReveal', '切换：内容逐块揭示 (0关 1开)', 0, 1, 1, '插件'],
+        ['switchFlash', '切换：亮度脉冲 强度', 0, 1, 0.05, '插件'],
+        ['switchHue', '切换：色相扫过 强度', 0, 1, 0.05, '插件'],
+        ['switchCam', '切换：镜头轻推 (0关 1开)', 0, 1, 1, '插件'],
       ];
 
       const BASE = {
@@ -161,6 +167,7 @@ window.__ModuleLoader__.load({
         centerX: 0, centerY: 0, scale: 1, hudOn: 1, feedOn: 1, dataMode: 1, backdrop: 0,
         runLevel: 1, voidLevel: 0, attackMs: 800, releaseMs: 2600,
         revolveOnSwitch: 1, revolveMs: 1500, easeCurve: 1,
+        revolveOuter: 1, switchReveal: 1, switchFlash: 0.6, switchHue: 0, switchCam: 1,
       };
 
       // 作者定稿默认（lab.html: BAKED_MINE, 2026-10-21）
@@ -274,6 +281,7 @@ window.__ModuleLoader__.load({
         let env = 0, out = 0, present = true, sessRunning = false;
         let envFrom = 0, envTarget = 0, envT = 0;      // transition bookkeeping for the level machine
         let spinOffset = 0, spin = null;
+        let switchT = -1, switchDur = 1.5;      // session-switch effect clock (s), -1 = idle
         let bld = 0, bldG = 1, coreG = 1;              // build-up gains: out → structure
         let tokPool = [], toolNames = [], pending = [], pendingT = 0;
         let act = 0, live01 = 0, mo = 0;
@@ -660,6 +668,8 @@ window.__ModuleLoader__.load({
             makeStrandLayer(0.45, 1.0, 0.5, 1.8, 0.8, 0.6, 0.35, 4, 16, 0.3),       // near
             makeStrandLayer(0.12, 1.0, 0.85, 1.0, 1.0, 0.5, 0.55, 14, 70, 0.32, 'bounce'), // wave / rebound
           ];
+          // parallax: each outer layer follows the one-shot revolve by its own factor
+          [0.35, 0.6, 1.0, 1.15, 0.5].forEach((k, i) => { if (strandLayers[i]) strandLayers[i].revK = k; });
           wedges = strandLayers[2].wedges.concat(strandLayers[4].wedges);
           hazes = []; flares = [];
           GR = {};
@@ -714,7 +724,8 @@ window.__ModuleLoader__.load({
           return a * o * (0.85 + 0.15 * Math.sin(h.age * 30));
         }
         function drawStrands(Lr, collect) {
-          const span = RMAX - RO - 20, r0 = RO + 3, rotA = ringRot * Lr.rotK + Lr.off;
+          const span = RMAX - RO - 20, r0 = RO + 3;
+          const rotA = ringRot * Lr.rotK + Lr.off + revOut() * (Lr.revK === undefined ? 0.5 : Lr.revK);
           S.lineCap = 'butt';
           for (const w of Lr.wedges) {
             if (!w.vis) continue;
@@ -783,7 +794,7 @@ window.__ModuleLoader__.load({
           const buckets = {};
           for (const f of flyers) {
             if (f.burst !== bursts) continue;
-            const a = normA(f.a + ringRot);
+            const a = normA(f.a + ringRot + revOut() * 0.85);
             if (a < -thS - 0.05 || a > thS + 0.05) continue;
             const key = f.tint * 10 + f.lv + (f.lw > 1.15 ? 100 : 0) + (f.burst ? 1000 : 0);
             (buckets[key] || (buckets[key] = [])).push(f, a);
@@ -810,7 +821,8 @@ window.__ModuleLoader__.load({
             const e = hazeEnv(h); if (e <= 0.01) continue;
             if (h.seed === undefined) h.seed = rnd() * 1000;
             const L = h.cur * span;
-            radialLines(h.a + ringRot - h.w / 2, h.a + ringRot + h.w / 2, NSTEP * 0.55, r0, L, h.seed, 0.45);
+            const ha = h.a + ringRot + revOut() * 0.4;
+            radialLines(ha - h.w / 2, ha + h.w / 2, NSTEP * 0.55, r0, L, h.seed, 0.45);
             S.strokeStyle = GR['s' + (h.tint === 1 ? 0 : h.tint === 2 ? 2 : 1)];
             S.globalAlpha = Math.min(1, h.alpha * e * 0.05 * C.hazeBright * bldG); S.lineWidth = 2.2; S.stroke();
             S.globalAlpha = Math.min(1, h.alpha * e * 0.6 * C.hazeBright * bldG); S.lineWidth = 0.55; S.stroke();
@@ -1145,7 +1157,12 @@ window.__ModuleLoader__.load({
           let regen = 1;
           for (const s of slots) {
             // build-up: panels are revealed in ring order as bld climbs (not just a global alpha multiply)
-            const show = bld >= 1 ? 1 : clamp((bld - s.rk) / 0.14, 0, 1);
+            let show = bld >= 1 ? 1 : clamp((bld - s.rk) / 0.14, 0, 1);
+            // switch window: rebuild the ring panel by panel as it turns, so the new
+            // Session's content replaces the old one in step with the revolve
+            if (switchT >= 0 && num(C.switchReveal, 1) >= 0.5) {
+              show *= clamp((switchT / switchDur - s.rk * 0.55) / 0.28, 0, 1);
+            }
             if (show <= 0.004) continue;
             const A = s.a + ringRot + spinOffset;      // + one-shot revolve offset
             if (s.flash > 0) s.flash = Math.max(0, s.flash - dtM * 2.2);
@@ -1244,9 +1261,17 @@ window.__ModuleLoader__.load({
           }
           clampCam();
         }
-        function camT(ctx, d) { ctx.setTransform(d * cam.z, 0, 0, d * cam.z, d * (W / 2 - cam.x * cam.z), d * (H / 2 - cam.y * cam.z)); }
+        /** switch punch: a small zoom dip on top of the camera; never written into cam itself */
+        function camPunch() {
+          if (switchT < 0 || num(C.switchCam, 1) < 0.5) return 1;
+          return 1 - 0.028 * Math.sin(Math.PI * (switchT / switchDur));
+        }
+        function camT(ctx, d) {
+          const z = cam.z * camPunch();
+          ctx.setTransform(d * z, 0, 0, d * z, d * (W / 2 - cam.x * z), d * (H / 2 - cam.y * z));
+        }
         function camTk(ctx, d, k) {
-          const z = 1 + (cam.z - 1) * k, x = W / 2 + (cam.x - W / 2) * k, y = H / 2 + (cam.y - H / 2) * k;
+          const z = (1 + (cam.z - 1) * k) * camPunch(), x = W / 2 + (cam.x - W / 2) * k, y = H / 2 + (cam.y - H / 2) * k;
           ctx.setTransform(d * z, 0, 0, d * z, d * (W / 2 - x * z), d * (H / 2 - y * z));
         }
         const toScreen = (x, y) => ({ x: (x - cam.x) * cam.z + W / 2, y: (y - cam.y) * cam.z + H / 2 });
@@ -1469,7 +1494,8 @@ window.__ModuleLoader__.load({
           const outA = clamp(out, 0, 1);
           const runLv = Math.max(0.2, clamp(num(C.runLevel, 1), 0.2, 2));
           bld = clamp(out / runLv, 0, 1);              // normalised build progress
-          bldG = 0.32 + 0.68 * bld;                    // outer beams / flyers / haze gain
+          bldG = (0.32 + 0.68 * bld) * (1 + 0.45 * clamp(num(C.switchFlash, 0), 0, 1) * switchPulse());
+          // outer beams / flyers / haze gain (switch pulse rides on top)
           coreG = 0.35 + 0.65 * bld;                   // light-field core + runner trail gain
           updateBeat(dtM, actOn);
           flushPending(dtM, actOn);
@@ -1576,7 +1602,7 @@ window.__ModuleLoader__.load({
             const head = Math.min(1, p * (1 + c.win)), tail = Math.max(0, p * (1 + c.win) - c.win);
             const fade = c.life > c.dur ? Math.max(0, 1 - (c.life - c.dur) / 0.25) : 1;
             if (fade <= 0) { comets.splice(i, 1); continue; }
-            const cr = C.cometFollow ? ringRot - c.rot0 : 0;
+            const cr = C.cometFollow ? ringRot - c.rot0 + spinOffset : 0;
             if (head >= 1 && !c.hit) { c.hit = true; const pe = cpt(c.lines[c.lines.length >> 1], 1); flashSlotAt(Math.atan2(pe.y, pe.x) + cr); }
             S.save(); S.rotate(cr);
             if (G2) G2.save();
@@ -1649,6 +1675,22 @@ window.__ModuleLoader__.load({
 
           drawScan(bd);
           drawCallout(dtM, bd);
+
+          // optional colour sweep over the switch window (off by default)
+          const hueK = clamp(num(C.switchHue, 0), 0, 1) * switchPulse();
+          if (hueK > 0.002) {
+            const u = switchU();
+            const hue = 200 + 60 * u;
+            const a = 0.11 * hueK;
+            S.setTransform(DPR, 0, 0, DPR, 0, 0);
+            S.globalCompositeOperation = 'lighter';
+            const hg = S.createRadialGradient(cx, cy, R * 0.15, cx, cy, RMAX);
+            hg.addColorStop(0, 'hsla(' + hue + ',88%,66%,' + a + ')');
+            hg.addColorStop(0.55, 'hsla(' + hue + ',88%,66%,' + (a * 0.45) + ')');
+            hg.addColorStop(1, 'hsla(' + hue + ',88%,66%,0)');
+            S.fillStyle = hg; S.fillRect(0, 0, W, H);
+            S.globalCompositeOperation = 'source-over';
+          }
 
           // fade the finished frame onto the visible canvas (single globalAlpha pass)
           S = S_MAIN;
@@ -1726,6 +1768,35 @@ window.__ModuleLoader__.load({
             spin = null;
           }
         }
+        /* ---------- session-switch effects (round 4) ---------- */
+        /** how far the outer light field follows the ring's one-shot revolve */
+        function revOut() {
+          return spinOffset * clamp(num(C.revolveOuter, 1), 0, 1);
+        }
+        /** 0..1 progress of the switch window, -1 when idle */
+        function switchU() { return switchT < 0 ? -1 : clamp(switchT / switchDur, 0, 1); }
+        /** 0 -> 1 -> 0 envelope over the switch window */
+        function switchPulse() {
+          const u = switchU();
+          return u < 0 ? 0 : Math.sin(Math.PI * u);
+        }
+        function updateSwitch(dt) {
+          if (switchT < 0) return;
+          switchT += dt;
+          if (switchT >= switchDur) switchT = -1;
+        }
+        /** start the switch window: reveal, brightness pulse, colour sweep, camera punch */
+        function switchFx(dur) {
+          if (disposed) return;
+          switchDur = Math.max(0.3, num(dur, num(C.revolveMs, 1500) / 1000));
+          switchT = 0;
+          // the visible panel text belongs to the previous Session: drop it so the
+          // ring rebuilds from the new Session's tokens while it turns
+          for (const s of slots) { release(s.c); s.c = null; }
+          tokPool = [];
+          toolNames = [];
+          dirty = true;
+        }
         function countParticles() {
           return runners.length + comets.length + pulses.length + hazes.length + flares.length + flyers.length + bokehs.length;
         }
@@ -1745,6 +1816,7 @@ window.__ModuleLoader__.load({
         function step(dt) {
           computeDrive(dt);
           updateSpin(dt);
+          updateSwitch(dt);
           statsTick(dt);
           if (!ready || disposed) return;
           applyRebuilds();
@@ -1812,6 +1884,7 @@ window.__ModuleLoader__.load({
             present, running: sessRunning,
             params: { ...C },
             /* extras, not part of the contract */
+            switchT, switchDur, outerRev: spinOffset * clamp(num(C.revolveOuter, 1), 0, 1),
             target: !present ? clamp(num(C.voidLevel, 0), 0, 1)
               : (sessRunning ? clamp(num(C.runLevel, 1), 0.2, 2) : clamp(num(C.idleMotion, 0), 0, 1)),
             build: bld, activity: act, spinning: !!spin, loopRunning: running,
@@ -1848,6 +1921,7 @@ window.__ModuleLoader__.load({
           stop,
           dispose,
           revolve,
+          switchFx,
           debug,
           /* introspection for diagnostics / tests */
           isRunning: () => running,
@@ -4093,8 +4167,10 @@ window.__ModuleLoader__.load({
           prevSessionRef.current = sessionId;
           if (previous === undefined || previous === sessionId) return;
           switchAtRef.current = Date.now();
-          if (!(params.revolveOnSwitch >= 0.5)) return;
           const engine = engineRef.current;
+          // the non-revolve switch effects run even when the ring spin is disabled
+          if (engine && typeof engine.switchFx === 'function') engine.switchFx();
+          if (!(params.revolveOnSwitch >= 0.5)) return;
           if (engine && typeof engine.revolve === 'function') engine.revolve(1);
           // eslint-disable-next-line react-hooks/exhaustive-deps
         }, [sessionId]);

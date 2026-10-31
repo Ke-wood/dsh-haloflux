@@ -153,21 +153,22 @@ function boot(opts) {
 
 /* ================= 1. metadata ================= */
 ok(!!E && typeof E.create === 'function', 'HalofluxEngine.create is a function');
-ok(E.PARAMS.length === 74, 'PARAMS count = 74 (got ' + E.PARAMS.length + ')');
+ok(E.PARAMS.length === 79, 'PARAMS count = 79 (got ' + E.PARAMS.length + ')');
 const keys = E.PARAMS.map(p => p[0]);
 ok(new Set(keys).size === keys.length, 'PARAMS keys are unique');
 const groups = [...new Set(E.PARAMS.map(p => p[5]))];
 ok(groups.join(',') === '全局,圆环,圈内,环外,空间层次,插件', 'groups + order = ' + groups.join(' | '));
 const plug = E.PARAMS.filter(p => p[5] === '插件').map(p => p[0]);
 ok(plug.join(',') === 'opacity,blend,idleMotion,activityGain,centerX,centerY,scale,hudOn,feedOn,dataMode,backdrop,'
-  + 'runLevel,voidLevel,attackMs,releaseMs,revolveOnSwitch,revolveMs,easeCurve',
+  + 'runLevel,voidLevel,attackMs,releaseMs,revolveOnSwitch,revolveMs,easeCurve,'
+  + 'revolveOuter,switchReveal,switchFlash,switchHue,switchCam',
   'plugin group = ' + plug.join(','));
 const row = k => E.PARAMS.find(p => p[0] === k) || [];
 const flag = k => row(k)[6];
 ok(flag('ringWidth') === 'resize' && flag('rimWidth') === 'slots' && flag('webBright') === 'web'
   && flag('webBlur') === 'web' && flag('flyerCount') === 'flyers', 'rebuild flags preserved');
 ok(E.PARAMS.filter(p => p[6]).length === 5, 'exactly 5 rebuild params');
-ok(Object.keys(E.BASE).length === 74 && keys.every(k => k in E.BASE), 'BASE covers all 74 keys');
+ok(Object.keys(E.BASE).length === 79 && keys.every(k => k in E.BASE), 'BASE covers all 79 keys');
 ok(row('idleMotion')[1] === '静默态强度', 'idleMotion label = 静默态强度');
 ok(E.BASE.idleMotion === 0.06 && E.PRESETS.MINE.idleMotion === 0.06, 'idleMotion default = 0.06');
 ok(E.BASE.camera === 1, 'BASE.camera untouched (still 1; mount turns it off)');
@@ -194,11 +195,11 @@ ok(!!eng, 'create({canvas, live, params}) returns an engine');
 ok(opCount === ctxOpsBeforeCreate, 'create() performs no canvas work (waits for start/resize)');
 ok(['setParams', 'getParams', 'resize', 'start', 'stop', 'dispose', 'revolve', 'debug']
   .every(k => typeof eng[k] === 'function'), 'api includes revolve() and debug()');
-ok(Object.keys(eng.getParams()).length === 74, 'getParams() returns the 74-key copy');
+ok(Object.keys(eng.getParams()).length === 79, 'getParams() returns the 79-key copy');
 const dbgKeys = ['ringRot', 'spinOffset', 'env', 'out', 'mo', 'present', 'running'];
 const d0 = eng.debug();
 ok(dbgKeys.every(k => k in d0), 'debug() exposes ' + dbgKeys.join('/'));
-ok(typeof d0.params === 'object' && Object.keys(d0.params).length === 74, 'debug().params is the 74-key copy');
+ok(typeof d0.params === 'object' && Object.keys(d0.params).length === 79, 'debug().params is the 79-key copy');
 ok(d0.present === true && d0.running === false && d0.env === 0 && d0.out === 0 && d0.mo === 0,
   'debug() initial: present (field missing ⇒ true), not running, level 0');
 
@@ -524,6 +525,39 @@ ok(threw4, 'create() without a canvas throws a clear error');
   ok(texts.indexOf('真实词元') < 0, 'level 0: no session token reaches the canvas');
   ok(fakeHits() > 0, 'level 0: original sample vocabulary fills the panels (' + fakeHits() + ' hits)');
   b4.kill();
+})();
+
+/* ================= 18. session-switch effects (all switchable) ================= */
+(function () {
+  const lv = {
+    activity: 1, tps: 10, tools: [{ id: '1', name: 'Bash', state: 'ok', t: 0 }],
+    sessionPresent: true, running: true, pullTokens: (n) => ['tok'].slice(0, Math.max(0, n)),
+  };
+  const b = boot({ live: lv, params: { attackMs: 100 } });
+  b.tick(30, 1000 / 60);
+  ok(typeof b.eng.switchFx === 'function', 'engine exposes switchFx()');
+
+  b.eng.switchFx(1.0);
+  ok(b.eng.debug().switchT === 0, 'switchFx() opens the switch window');
+  b.tick(20, 1000 / 60);
+  const mid = b.eng.debug();
+  ok(mid.switchT > 0 && mid.switchT < 1, 'switch window advances with time (' + mid.switchT.toFixed(3) + 's)');
+
+  // own toggle: the outer light field follows the ring spin only when enabled
+  b.eng.setParams({ revolveOuter: 1 });
+  b.eng.revolve(1);
+  b.tick(2, 1000 / 60);
+  let d = b.eng.debug();
+  ok(Math.abs(d.outerRev - d.spinOffset) < 1e-9, 'revolveOuter=1: outer field equals the ring spin offset');
+  b.eng.setParams({ revolveOuter: 0 });
+  b.tick(2, 1000 / 60);
+  d = b.eng.debug();
+  ok(Math.abs(d.outerRev) < 1e-9 && Math.abs(d.spinOffset) > 0,
+    'revolveOuter=0: the ring still spins, the outer field stays put');
+
+  b.tick(90, 1000 / 60);
+  ok(b.eng.debug().switchT === -1, 'switch window closes after its duration');
+  b.kill();
 })();
 
 console.log('\nopCount=' + opCount + ' clearRects=' + clearCount + ' darkFills=' + darkFills.length
