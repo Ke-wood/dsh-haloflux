@@ -227,3 +227,5 @@ node tools/session-switch.cjs   # 切会话回归：运行态不被清、内容�
   <https://github.com/Ryder191/haloflux>，PolyForm Noncommercial License 1.0.0。
 - 本移植：同样**仅限非商业使用**，可在保留 `LICENSE` 与 `NOTICE` 的前提下自由分发与修改。
 - 再分发、二次修改请保留 `NOTICE` 中的 Required Notice 行。
+- 上游已在 `Community` / `社区作品` 一节收录本项目（上游 commit `ff9a4a6`）：
+  <https://github.com/Ryder191/haloflux#community>。上游仓库只保留原作代码，插件由本项目独立维护。
