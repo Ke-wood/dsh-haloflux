@@ -160,7 +160,8 @@ const HalofluxEngine = (() => {
     /* ---- round 7: live gauges drawn on the field (each one a switch) ---- */
     ['ctxArc', '上下文占用弧 (0关 1开)', 0, 1, 1, '数据'],
     ['toolBeam', '工具调用带名光带 (0关 1开)', 0, 1, 1, '数据'],
-    ['errFx', '失败提示 红闪 (0关 1开)', 0, 1, 1, '数据'],
+    ['errFx', '失败提示 红蓝故障感 (0关 1开)', 0, 1, 1, '数据'],
+    ['glitchAmt', '故障感 强度 (抖动/色散/撕裂)', 0, 1, 0.05, '数据'],
     ['stepTicks', '步骤刻度 (0关 1开)', 0, 1, 1, '数据'],
     ['hudScale', 'HUD 缩放', 0.8, 1.6, 0.05, 'HUD'],
     ['hudInset', 'HUD 边距 px', 4, 48, 1, 'HUD'],
@@ -200,7 +201,7 @@ const HalofluxEngine = (() => {
     /* layer separation: off by default for blur, guard on at a light strength */
     fieldBlur: 0, ringData: 1, guardOn: 1, guardStrength: 0.4, guardRadius: 0.9, guardColW: 0, plateAlpha: 0.72,
     fieldBright: 1, guardBlur: 0, motionQuiet: 0, readFade: 0,
-    ctxArc: 1, toolBeam: 1, errFx: 0, stepTicks: 1,
+    ctxArc: 1, toolBeam: 1, errFx: 0, glitchAmt: 0.6, stepTicks: 1,
     hudScale: 1, hudInset: 12, hudTop: 6, tintFollow: 0,
     phaseRing: 1, errPin: 1, tpsRibbon: 1, thinkPulse: 1,
     glowBlurSmall: 1, adaptQuality: 1, idleSleepMs: 0, hudFadeMs: 0,
@@ -332,6 +333,8 @@ const HalofluxEngine = (() => {
     let DPR = 1, HAS_FILTER = false;
     let W = 0, H = 0, cx = 0, cy = 0, R = 0, RO = 0, RMAX = 0, thV = 0, thS = 0;
     let webBase = null, webLayers = [], trailC = null, glowC = null, glowB = null, laneC = null, farC = null, frameC = null;
+    /** lazily allocated buffer for the error glitch chromatic split */
+    let glitchC = null;
     /** last applied text-guard clearing (diagnostics only; null when the guard is off) */
     let guardHit = null;
     let bokehSpr = null, scanPatDark = null, scanPatLight = null, scanGrad = null, webDisc = null;
@@ -578,6 +581,7 @@ const HalofluxEngine = (() => {
       release(trailC); trailC = null;
       release(glowC); glowC = null;
       release(glowB); glowB = null;
+      release(glitchC); glitchC = null;
       release(laneC); laneC = null;
       release(farC); farC = null;
 
@@ -1852,6 +1856,13 @@ const HalofluxEngine = (() => {
       // two planes are visibly separate (switchable; no-op when guardOn is off)
       applyTextGuard(S);
 
+      // error glitch: shake + slice tearing + red/blue chromatic split.
+      // Default OFF (errFx = 0) because a failed tool is the most frequent event in an
+      // agent loop; a full-frame effect is the loudest channel we have. errPin marks
+      // the individual failure, this is the optional "something broke" reading.
+      const glitchOn = errT >= 0 && num(C.errFx, 0) >= 0.5;
+      const gl = glitchOn ? Math.sin(Math.PI * Math.min(1, errT / 0.9)) * clamp(num(C.glitchAmt, 0.6), 0, 1) : 0;
+
       // fade the finished frame onto the visible canvas (single globalAlpha pass)
       S = S_MAIN;
       if (target !== S_MAIN) {
@@ -1860,7 +1871,43 @@ const HalofluxEngine = (() => {
         S.setTransform(DPR, 0, 0, DPR, 0, 0);
         S.globalCompositeOperation = 'source-over';
         S.globalAlpha = outA;
-        if (src) S.drawImage(src, 0, 0, W, H);
+        if (src && gl > 0.004) {
+          // 1) shake: the whole frame jitters by a couple of pixels
+          const sx = (rnd() - 0.5) * 6 * gl;
+          const sy = (rnd() - 0.5) * 4 * gl;
+          // 2) slice tearing: a few horizontal bands are displaced sideways
+          const bands = 3 + Math.round(gl * 3);
+          let y = 0;
+          for (let i = 0; i < bands && y < H; i++) {
+            const hgt = (H / bands) * rr(0.55, 1.5);
+            const dx = (rnd() - 0.5) * 26 * gl;
+            S.drawImage(src, 0, y * DPR, src.width, hgt * DPR, sx + dx, y + sy, W, hgt);
+            y += hgt;
+          }
+          // 3) chromatic split: the frame is copied twice, tinted red / blue and
+          //    re-composited additively at opposite offsets (glitch window only)
+          const gb = ensureGlitch();
+          if (gb && gb.x) {
+            const d = 2 + 7 * gl;
+            for (const [tint, off] of [['#ff2b2b', d], ['#2b6bff', -d]]) {
+              const G2 = gb.x;
+              G2.setTransform(1, 0, 0, 1, 0, 0);
+              G2.globalCompositeOperation = 'source-over';
+              G2.globalAlpha = 1;
+              G2.clearRect(0, 0, gb.width, gb.height);
+              G2.drawImage(src, 0, 0);
+              G2.globalCompositeOperation = 'multiply';
+              G2.fillStyle = tint;
+              G2.fillRect(0, 0, gb.width, gb.height);
+              G2.globalCompositeOperation = 'source-over';
+              S.globalCompositeOperation = 'lighter';
+              S.globalAlpha = outA * 0.55 * gl;
+              S.drawImage(gb, off, 0, W, H);
+            }
+            S.globalCompositeOperation = 'source-over';
+            S.globalAlpha = outA;
+          }
+        } else if (src) S.drawImage(src, 0, 0, W, H);
         S.globalAlpha = 1;
         // mirror the finished frame onto the second surface (masked by the host);
         // skipped entirely while guardBlur is off, so the default look pays nothing
@@ -2156,6 +2203,18 @@ const HalofluxEngine = (() => {
         S.globalCompositeOperation = 'source-over';
       }
     }
+    /** scratch buffer for the chromatic split (allocated once, only if used) */
+    function ensureGlitch() {
+      if (!glitchC && canvas && canvas.width && canvas.height) {
+        glitchC = newCanvas(canvas.width, canvas.height);
+        if (glitchC) {
+          glitchC.width = Math.max(1, canvas.width | 0);
+          glitchC.height = Math.max(1, canvas.height | 0);
+          glitchC.x = glitchC.getContext('2d');
+        }
+      }
+      return glitchC;
+    }
     function countParticles() {
       return runners.length + comets.length + pulses.length + hazes.length + flares.length + flyers.length + bokehs.length;
     }
@@ -2387,6 +2446,7 @@ const HalofluxEngine = (() => {
       release(trailC); trailC = null;
       release(glowC); glowC = null;
       release(glowB); glowB = null;
+      release(glitchC); glitchC = null;
       release(laneC); laneC = null;
       release(farC); farC = null;
       release(frameC); frameC = null;
