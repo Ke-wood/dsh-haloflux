@@ -153,11 +153,11 @@ function boot(opts) {
 
 /* ================= 1. metadata ================= */
 ok(!!E && typeof E.create === 'function', 'HalofluxEngine.create is a function');
-ok(E.PARAMS.length === 101, 'PARAMS count = 101 (got ' + E.PARAMS.length + ')');
+ok(E.PARAMS.length === 109, 'PARAMS count = 109 (got ' + E.PARAMS.length + ')');
 const keys = E.PARAMS.map(p => p[0]);
 ok(new Set(keys).size === keys.length, 'PARAMS keys are unique');
 const groups = [...new Set(E.PARAMS.map(p => p[5]))];
-ok(groups.join(',') === '全局,圆环,圈内,环外,空间层次,插件,分层,数据,HUD,配色', 'groups + order = ' + groups.join(' | '));
+ok(groups.join(',') === '全局,圆环,圈内,环外,空间层次,插件,分层,数据,HUD,配色,状态,性能', 'groups + order = ' + groups.join(' | '));
 const layer = E.PARAMS.filter(p => p[5] === '分层').map(p => p[0]);
 ok(layer.join(',') === 'fieldBlur,ringData,guardOn,guardStrength,guardRadius,guardColW,plateAlpha,fieldBright,guardBlur,motionQuiet,readFade',
   'layer-separation group = ' + layer.join(','));
@@ -176,7 +176,7 @@ const flag = k => row(k)[6];
 ok(flag('ringWidth') === 'resize' && flag('rimWidth') === 'slots' && flag('webBright') === 'web'
   && flag('webBlur') === 'web' && flag('flyerCount') === 'flyers', 'rebuild flags preserved');
 ok(E.PARAMS.filter(p => p[6]).length === 5, 'exactly 5 rebuild params');
-ok(Object.keys(E.BASE).length === 101 && keys.every(k => k in E.BASE), 'BASE covers all 101 keys');
+ok(Object.keys(E.BASE).length === 109 && keys.every(k => k in E.BASE), 'BASE covers all 109 keys');
 ok(row('idleMotion')[1] === '静默态强度', 'idleMotion label = 静默态强度');
 ok(E.BASE.idleMotion === 0.06 && E.PRESETS.MINE.idleMotion === 0.06, 'idleMotion default = 0.06');
 ok(E.BASE.camera === 1, 'BASE.camera untouched (still 1; mount turns it off)');
@@ -203,11 +203,11 @@ ok(!!eng, 'create({canvas, live, params}) returns an engine');
 ok(opCount === ctxOpsBeforeCreate, 'create() performs no canvas work (waits for start/resize)');
 ok(['setParams', 'getParams', 'resize', 'start', 'stop', 'dispose', 'revolve', 'debug']
   .every(k => typeof eng[k] === 'function'), 'api includes revolve() and debug()');
-ok(Object.keys(eng.getParams()).length === 101, 'getParams() returns the 101-key copy');
+ok(Object.keys(eng.getParams()).length === 109, 'getParams() returns the 109-key copy');
 const dbgKeys = ['ringRot', 'spinOffset', 'env', 'out', 'mo', 'present', 'running'];
 const d0 = eng.debug();
 ok(dbgKeys.every(k => k in d0), 'debug() exposes ' + dbgKeys.join('/'));
-ok(typeof d0.params === 'object' && Object.keys(d0.params).length === 101, 'debug().params is the 101-key copy');
+ok(typeof d0.params === 'object' && Object.keys(d0.params).length === 109, 'debug().params is the 109-key copy');
 ok(d0.present === true && d0.running === false && d0.env === 0 && d0.out === 0 && d0.mo === 0,
   'debug() initial: present (field missing ⇒ true), not running, level 0');
 
@@ -624,6 +624,73 @@ ok(threw4, 'create() without a canvas throws a clear error');
   lv.tools.push({ id: '3', name: 'Write', state: 'ok', t: 0 });
   b.tick(10, 1000 / 60);
   ok(true, 'a new tool call draws a labelled beam without throwing');
+  b.kill();
+})();
+
+/* ================= 21. state semantics: phase ring / errPin / tpsRibbon ================= */
+(function () {
+  const now = () => clock;
+  const lv = {
+    activity: 0.8, sessionPresent: true, running: true, tps: 20,
+    stepsDone: 3, contextTokens: 1000, contextLimit: 0,
+    tools: [], pullTokens: () => [],
+    streaming: false, streamAt: 0, thinking: false, thinkAt: 0,
+    lastToolAt: 0, interrupted: false,
+  };
+  const b = boot({ live: lv, params: { attackMs: 100 } });
+  b.tick(20, 1000 / 60);
+  ok(b.eng.debug().phase === 0, 'phase = 0 (waiting) when nothing is streaming');
+
+  lv.thinking = true; lv.thinkAt = now();
+  b.tick(2, 1000 / 60);
+  ok(b.eng.debug().phase === 1, 'phase = 1 (thinking) on a fresh reasoning timestamp');
+
+  lv.streaming = true; lv.streamAt = now();
+  b.tick(2, 1000 / 60);
+  ok(b.eng.debug().phase === 2, 'phase = 2 (streaming) on a fresh text timestamp');
+
+  lv.tools.push({ id: 't1', name: 'Bash', state: 'running', t: 0 });
+  lv.lastToolAt = now();
+  b.tick(2, 1000 / 60);
+  ok(b.eng.debug().phase === 3, 'phase = 3 (tool running) outranks streaming');
+
+  // errPin: a failed tool is marked locally, and errFx stays off by default
+  lv.tools[0].state = 'error';
+  b.tick(4, 1000 / 60);
+  ok(b.eng.debug().params.errFx === 0 && b.eng.debug().params.errPin === 1,
+    'errFx defaults off, errPin defaults on (no full-frame flash for a routine failure)');
+
+  b.eng.setParams({ phaseRing: 0, errPin: 0, tpsRibbon: 0 });
+  b.tick(4, 1000 / 60);
+  const off = b.eng.debug().params;
+  ok(off.phaseRing === 0 && off.errPin === 0 && off.tpsRibbon === 0, 'all three state channels switch off');
+  b.kill();
+})();
+
+/* ================= 22. performance switches: adaptive quality + idle sleep ================= */
+(function () {
+  const lv = { activity: 0.8, sessionPresent: true, running: true, tools: [], pullTokens: () => [] };
+  const b = boot({ live: lv, params: { attackMs: 100 } });
+  b.tick(10, 1000 / 60);
+  ok(b.eng.debug().quality.level === 0, 'full quality on a healthy frame rate');
+  ok(typeof b.eng.setIdle === 'function', 'engine exposes setIdle() for idleSleepMs');
+
+  // a very slow loop must degrade instead of silently dropping frames
+  b.tick(40, 120);
+  const q = b.eng.debug().quality;
+  ok(q.level >= 1, 'low fps raises the quality level (level=' + q.level + ', fps≈' + q.fps + ')');
+
+  b.eng.setParams({ adaptQuality: 0 });
+  b.tick(4, 120);
+  ok(b.eng.debug().quality.level === 0, 'adaptQuality=0 pins full quality');
+
+  b.eng.setParams({ adaptQuality: 1, idleSleepMs: 30000 });
+  b.eng.setIdle(31000);
+  b.tick(3, 1000 / 60);
+  ok(b.eng.debug().asleep === true, 'idleSleepMs reached → the loop parks');
+  b.eng.setIdle(0);
+  b.tick(3, 1000 / 60);
+  ok(b.eng.debug().asleep === false, 'interaction wakes the loop again');
   b.kill();
 })();
 

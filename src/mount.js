@@ -227,6 +227,8 @@ const HalofluxPlugin = (() => {
     const [stats, setStats] = React.useState(null);
     const [liveTick, setLiveTick] = React.useState(0);
     const [reading, setReading] = React.useState(false);
+    /** last time a HUD tick was pushed (hudFadeMs throttling) */
+    const lastHudPush = React.useRef(0);
 
     const patchParams = React.useCallback((partial) => { HalofluxState.set(partial); }, []);
 
@@ -244,7 +246,16 @@ const HalofluxPlugin = (() => {
       liveRef.current = live;
       // presence must be right before the first frame, not one effect later
       try { live.sessionPresent = sessionRef.current !== undefined; } catch { /* readonly */ }
-      const off = live.subscribe(() => setLiveTick((n) => (n + 1) % 1000000));
+      const off = live.subscribe(() => {
+        // hudFadeMs throttles HUD re-renders independently of the engine's frame rate
+        const gap = Number(params.hudFadeMs) || 0;
+        if (gap > 0) {
+          const t = Date.now();
+          if (t - lastHudPush.current < gap) return;
+          lastHudPush.current = t;
+        }
+        setLiveTick((n) => (n + 1) % 1000000);
+      });
       try { if (typeof window !== 'undefined' && window.__HFX_DEBUG) window.__hfx = { live: live, engine: () => engineRef.current }; } catch { /* debug hook */ }
       return () => { off(); live.dispose(); liveRef.current = null; };
     }, []);
@@ -382,15 +393,25 @@ const HalofluxPlugin = (() => {
       return () => window.removeEventListener('keydown', onKey);
     }, [params.hudOn, patchParams]);
 
-    /* readFade: interact → the field steps back, 2.5s idle → it comes back.
-       Only wheel/scroll/keys, so passive viewing keeps the full look. */
+    /* idleSleepMs: after N ms without interaction the engine parks entirely.
+       One shared interaction clock drives both this and readFade. */
     React.useEffect(() => {
-      if (!(Number(params.readFade) >= 0.5)) { setReading(false); return undefined; }
+      const sleepOn = Number(params.idleSleepMs) > 0;
+      const fadeOn = Number(params.readFade) >= 0.5;
+      if (!sleepOn && !fadeOn) {
+        setReading(false);
+        if (engineRef.current && typeof engineRef.current.setIdle === 'function') engineRef.current.setIdle(0);
+        return undefined;
+      }
+      let lastAt = Date.now();
       let timer = 0;
       const bump = () => {
-        setReading(true);
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(() => { timer = 0; setReading(false); }, 2500);
+        lastAt = Date.now();
+        if (fadeOn) {
+          setReading(true);
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(() => { timer = 0; setReading(false); }, 2500);
+        }
       };
       const passive = { passive: true };
       const capture = { passive: true, capture: true };
@@ -398,14 +419,21 @@ const HalofluxPlugin = (() => {
       window.addEventListener('scroll', bump, capture);
       window.addEventListener('keydown', bump, passive);
       window.addEventListener('mousedown', bump, passive);
+      window.addEventListener('pointermove', bump, passive);
+      const poll = setInterval(() => {
+        const engine = engineRef.current;
+        if (engine && typeof engine.setIdle === 'function') engine.setIdle(Date.now() - lastAt);
+      }, 1000);
       return () => {
         if (timer) clearTimeout(timer);
+        clearInterval(poll);
         window.removeEventListener('wheel', bump, passive);
         window.removeEventListener('scroll', bump, capture);
         window.removeEventListener('keydown', bump, passive);
         window.removeEventListener('mousedown', bump, passive);
+        window.removeEventListener('pointermove', bump, passive);
       };
-    }, [params.readFade]);
+    }, [params.readFade, params.idleSleepMs]);
 
     const blendMode = ['screen', 'lighten', 'normal'][params.blend | 0] || 'screen';
     // readFade: while the user scrolls/types the field recedes, then returns on idle
@@ -527,7 +555,8 @@ const HalofluxPlugin = (() => {
         },
       }),
       hudVisible && HalofluxHud && live ? h(HalofluxHud.Stats, { ...hudProps, liveTick }) : null,
-      hudVisible && HalofluxHud && live ? h(HalofluxHud.Feed, { ...hudProps, liveTick }) : null,
+      hudVisible && HalofluxHud && live && Number(params.feedOn) >= 0.5
+        ? h(HalofluxHud.Feed, { ...hudProps, liveTick }) : null,
       hudVisible && HalofluxHud && live ? h(HalofluxHud.Tools, { ...hudProps, liveTick }) : null,
       HalofluxHud && live ? h(HalofluxHud.Console, { ...hudProps, liveTick }) : null,
     );

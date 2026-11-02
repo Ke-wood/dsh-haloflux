@@ -34,7 +34,11 @@ const HalofluxHud = (() => {
     // v0.4.0 layer separation (mirrors engine BASE)
     fieldBlur: 0, ringData: 1, guardOn: 1, guardStrength: 0.4, guardRadius: 0.9, guardColW: 0, plateAlpha: 0.72,
     fieldBright: 1, guardBlur: 0, motionQuiet: 0, readFade: 0,
-    tintAmount: 0, tintHue: 210, tintSat: 1.6,
+    tintAmount: 0, tintHue: 210, tintSat: 1.6, tintFollow: 0,
+    ctxArc: 1, toolBeam: 1, errFx: 0, stepTicks: 1,
+    hudScale: 1, hudInset: 12, hudTop: 6,
+    phaseRing: 1, errPin: 1, tpsRibbon: 1, thinkPulse: 1,
+    glowBlurSmall: 1, adaptQuality: 1, idleSleepMs: 0, hudFadeMs: 0,
   };
 
   /* ------------------------------------------------------------------ *

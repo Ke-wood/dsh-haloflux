@@ -176,6 +176,16 @@ window.__ModuleLoader__.load({
         ['tintHue', '主题色相 0-360', 0, 360, 5, '配色'],
         ['tintSat', '主题饱和 增强', 0.2, 3, 0.05, '配色'],
         ['tintFollow', '跟随 DSH 主题色 (0关 1开)', 0, 1, 1, '配色'],
+        /* ---- round 8: state semantics (each one a switch) ---- */
+        ['phaseRing', '相位环 思考/流式/调工具/停滞 (0关 1开)', 0, 1, 1, '状态'],
+        ['errPin', '失败钉 局部标记 (0关 1开)', 0, 1, 1, '状态'],
+        ['tpsRibbon', '流速带 相对中位数 (0关 1开)', 0, 1, 1, '状态'],
+        ['thinkPulse', '思考态脉动 (0关 1开)', 0, 1, 1, '状态'],
+        /* ---- round 9: performance (each one a switch) ---- */
+        ['glowBlurSmall', '辉光在小缓冲上模糊 (省一次全屏高斯)', 0, 1, 1, '性能'],
+        ['adaptQuality', '低帧率自动降质 (0关 1开)', 0, 1, 1, '性能'],
+        ['idleSleepMs', '无交互休眠 (ms, 0=不睡)', 0, 120000, 1000, '性能'],
+        ['hudFadeMs', 'HUD 更新节流 (ms)', 0, 1000, 50, '性能'],
       ];
 
       const BASE = {
@@ -196,8 +206,10 @@ window.__ModuleLoader__.load({
         /* layer separation: off by default for blur, guard on at a light strength */
         fieldBlur: 0, ringData: 1, guardOn: 1, guardStrength: 0.4, guardRadius: 0.9, guardColW: 0, plateAlpha: 0.72,
         fieldBright: 1, guardBlur: 0, motionQuiet: 0, readFade: 0,
-        ctxArc: 1, toolBeam: 1, errFx: 1, stepTicks: 1,
+        ctxArc: 1, toolBeam: 1, errFx: 0, stepTicks: 1,
         hudScale: 1, hudInset: 12, hudTop: 6, tintFollow: 0,
+        phaseRing: 1, errPin: 1, tpsRibbon: 1, thinkPulse: 1,
+        glowBlurSmall: 1, adaptQuality: 1, idleSleepMs: 0, hudFadeMs: 0,
         tintAmount: 0, tintHue: 210, tintSat: 1.6,
       };
 
@@ -325,7 +337,7 @@ window.__ModuleLoader__.load({
         let S = null, S_MAIN = null, S2 = null;
         let DPR = 1, HAS_FILTER = false;
         let W = 0, H = 0, cx = 0, cy = 0, R = 0, RO = 0, RMAX = 0, thV = 0, thS = 0;
-        let webBase = null, webLayers = [], trailC = null, glowC = null, laneC = null, farC = null, frameC = null;
+        let webBase = null, webLayers = [], trailC = null, glowC = null, glowB = null, laneC = null, farC = null, frameC = null;
         /** last applied text-guard clearing (diagnostics only; null when the guard is off) */
         let guardHit = null;
         let bokehSpr = null, scanPatDark = null, scanPatLight = null, scanGrad = null, webDisc = null;
@@ -350,6 +362,53 @@ window.__ModuleLoader__.load({
         let raf = 0, last = nowMs(), sizeCheck = 0;
         let frames = 0, fpsT = 0, fps = 60, statT = 0;
         let rebuildQ = {};
+
+        /* ---------- v0.7.0: adaptive quality + idle sleep ----------
+           Cost used to be independent of what the user sees: an idle session sits at
+           out = idleMotion (0.18) yet pays the full per-frame price. Both levers are
+           switchable and both only ever REDUCE work, never change the look while
+           activity is high. */
+        let qualFps = 60;            // eased fps estimate used by adaptQuality
+        let qualLow = 0;             // consecutive low-fps windows
+        let qualLevel = 0;           // 0 = full, 1 = reduced, 2 = minimal
+        let idleMs = 0;              // ms since the last interaction (host pushes it)
+        let asleep = false;          // idleSleepMs reached: the loop parks entirely
+
+        /** quality level 0..2 -> render scale multiplier for the expensive layers */
+        function qualK() { return qualLevel === 0 ? 1 : (qualLevel === 1 ? 0.75 : 0.5); }
+
+        function updateQuality(dt) {
+          // fps estimate: eased, so one slow frame does not trip the switch
+          if (dt > 0) {
+            const inst = 1 / dt;
+            qualFps += (inst - qualFps) * (1 - Math.exp(-dt * 2));
+          }
+          if (num(C.adaptQuality, 1) < 0.5) { qualLevel = 0; qualLow = 0; return; }
+          if (qualFps < 42) {
+            qualLow += dt;
+            if (qualLow > 1.2) {
+              if (qualLevel < 2) qualLevel += 1;
+              qualLow = 0;
+            }
+          } else if (qualFps > 55) {
+            qualLow -= dt * 0.5;
+            if (qualLow < -2.5) {
+              if (qualLevel > 0) qualLevel -= 1;
+              qualLow = 0;
+            }
+          }
+        }
+
+        /** the host pushes "ms since the user last touched the app" */
+        function setIdle(ms) {
+          const v = Number(ms);
+          if (!isFinite(v)) return;
+          idleMs = Math.max(0, v);
+          const limit = num(C.idleSleepMs, 0);
+          const shouldSleep = limit > 0 && idleMs >= limit;
+          if (shouldSleep && !asleep) { asleep = true; }
+          else if (!shouldSleep && asleep) { asleep = false; dirty = true; }
+        }
 
         const EPS_ACT = 0.004;
 
@@ -524,6 +583,7 @@ window.__ModuleLoader__.load({
           webBase = null; webLayers = [];
           release(trailC); trailC = null;
           release(glowC); glowC = null;
+          release(glowB); glowB = null;
           release(laneC); laneC = null;
           release(farC); farC = null;
 
@@ -541,6 +601,13 @@ window.__ModuleLoader__.load({
           if (glowC) {
             glowC.width = Math.max(1, Math.ceil(W / GS)); glowC.height = Math.max(1, Math.ceil(H / GS));
             glowC.x = glowC.getContext('2d');
+          }
+          // second low-res buffer: the glow is blurred here instead of on the full frame
+          release(glowB);
+          glowB = newCanvas(W / GS, H / GS);
+          if (glowB) {
+            glowB.width = Math.max(1, Math.ceil(W / GS)); glowB.height = Math.max(1, Math.ceil(H / GS));
+            glowB.x = glowB.getContext('2d');
           }
           // full-res compositing buffer: the whole scene is drawn here, then faded onto the
           // visible canvas with globalAlpha = out (see drawStage) — this is the fade mechanism
@@ -853,7 +920,7 @@ window.__ModuleLoader__.load({
         }
         function initFlyers() {
           flyBands = Array.from({ length: 7 }, newFlyBand);
-          const n = Math.round(Math.min(750, 320 + W * 0.25) * clamp(num(C.flyerCount, 1), 0, 3));
+          const n = Math.round(Math.min(750, 320 + W * 0.25) * clamp(num(C.flyerCount, 1), 0, 3) * qualK());
           flyers = Array.from({ length: n }, () => newFlyer(true));
         }
         function drawFlyers(bursts) {
@@ -960,7 +1027,7 @@ window.__ModuleLoader__.load({
           for (let i = 0; i < n; i++) bokehs.push(newBokeh());
         }
         function drawBokeh(dtM, actOn) {
-          const n = Math.round(clamp(num(C.bokeh, 0), 0, 80));
+          const n = Math.round(clamp(num(C.bokeh, 0), 0, 80) * qualK());
           // no new bokeh while the session is idle; shrinking always applies
           while (actOn && bokehs.length < n) bokehs.push(newBokeh());
           if (bokehs.length > n) bokehs.length = n;
@@ -1621,7 +1688,7 @@ window.__ModuleLoader__.load({
           // runners: speed surges on the beat
           const tx = trailC && trailC.x;
           const surge = 0.5 + 2.5 * benv;
-          const wantRunners = Math.round(clamp(num(C.runnerCount, 0), 0, 900));
+          const wantRunners = Math.round(clamp(num(C.runnerCount, 0), 0, 900) * qualK());
           while (actOn && runners.length < wantRunners) runners.push(newRunner(true));
           if (runners.length > wantRunners) runners.length = Math.max(0, wantRunners);
           if (tx) {
@@ -1726,13 +1793,32 @@ window.__ModuleLoader__.load({
 
           drawRing(dtM, actOn, bd);
 
-          // composite soft glow
+          // composite soft glow. The blur used to run on the full-resolution frame
+          // (a 5.2 Mpx gaussian every frame); blurring the low-res glow buffer into a
+          // second low-res buffer instead is visually identical, because the result is
+          // upscaled right after — and the gaussian then costs 1/GS² of the pixels.
           S.setTransform(DPR, 0, 0, DPR, 0, 0);
           S.globalCompositeOperation = 'lighter';
-          if (HAS_FILTER) S.filter = 'blur(6px)';
-          S.globalAlpha = Math.min(1, 0.9 * C.glow) * coreG;
-          if (glowC) S.drawImage(glowC, 0, 0, glowC.width * GS, glowC.height * GS);
-          if (HAS_FILTER) S.filter = 'none';
+          const glowOn = Math.min(1, 0.9 * C.glow) * coreG;
+          if (glowC) {
+            let src = glowC;
+            if (num(C.glowBlurSmall, 1) >= 0.5 && glowB && glowB.x && HAS_FILTER) {
+              const B = glowB.x;
+              B.setTransform(1, 0, 0, 1, 0, 0);
+              B.globalCompositeOperation = 'source-over';
+              B.globalAlpha = 1;
+              B.clearRect(0, 0, glowB.width, glowB.height);
+              B.filter = 'blur(' + (6 * GS).toFixed(1) + 'px)';
+              B.drawImage(glowC, 0, 0);
+              B.filter = 'none';
+              src = glowB;
+            } else if (HAS_FILTER) {
+              S.filter = 'blur(6px)';      // fallback: full-res blur, the old path
+            }
+            S.globalAlpha = glowOn;
+            S.drawImage(src, 0, 0, glowC.width * GS, glowC.height * GS);
+            if (HAS_FILTER) S.filter = 'none';
+          }
           S.globalAlpha = 1; S.globalCompositeOperation = 'source-over';
 
           drawBokeh(dtM, actOn);
@@ -1764,6 +1850,9 @@ window.__ModuleLoader__.load({
 
           // live gauges (context arc / step ticks / tool beam / error wash)
           drawGauges();
+          drawPhaseRing();
+          drawErrPins();
+          drawTpsRibbon();
 
           // text guard: punch the light field down where the reading text sits, so the
           // two planes are visibly separate (switchable; no-op when guardOn is off)
@@ -1961,6 +2050,11 @@ window.__ModuleLoader__.load({
         let toolSeen = '';              // last tool id already given a beam
         let beamT = -1, beamName = '', beamA = 0;
         let errSeen = 0, errT = -1;
+        let tpsHist = [];               // rolling tps history for the relative ribbon
+        /* phase bookkeeping: the adapter flips booleans, the engine stamps them on its
+           own clock so "recently" means the same thing in both places */
+        const phaseAt = { think: -99, stream: -99, tool: -99 };
+        const phaseSeen = { think: false, stream: false, toolAt: 0 };
         let ctxShown = 0;               // eased context occupancy (arc length follows it)
 
         /** -1 = unknown (no context window from the host yet) */
@@ -2005,13 +2099,16 @@ window.__ModuleLoader__.load({
         function drawGauges() {
           S.setTransform(DPR, 0, 0, DPR, 0, 0);
           S.save(); S.translate(cx, cy);
-          // context occupancy: an arc inside the ring, cyan until it gets tight
-          if (num(C.ctxArc, 0) >= 0.5 && gaugeCtxFrac() >= 0) {
-            const RA = R * 0.9, f = clamp(ctxShown, 0, 1);
+          // context occupancy: an arc inside the ring, cyan until it gets tight. When the
+          // host does not publish a context window, a grey base track is still drawn, so
+          // the channel does not silently disappear (the HUD shows "--" for the same fact).
+          if (num(C.ctxArc, 0) >= 0.5) {
+            const RA = R * 0.9, known = gaugeCtxFrac() >= 0, f = clamp(ctxShown, 0, 1);
             S.globalCompositeOperation = 'lighter';
-            S.strokeStyle = 'rgba(120,200,255,.10)'; S.lineWidth = 2.2;
+            S.strokeStyle = known ? 'rgba(120,200,255,.10)' : 'rgba(180,190,210,.08)';
+            S.lineWidth = 2.2;
             S.beginPath(); S.arc(0, 0, RA, -Math.PI / 2, -Math.PI / 2 + TAU); S.stroke();
-            if (f > 0.002) {
+            if (known && f > 0.002) {
               S.strokeStyle = f > 0.82 ? 'rgba(255,140,120,.85)' : 'rgba(140,215,255,.7)';
               S.lineWidth = 2.6;
               S.beginPath(); S.arc(0, 0, RA, -Math.PI / 2, -Math.PI / 2 + TAU * f); S.stroke();
@@ -2020,7 +2117,7 @@ window.__ModuleLoader__.load({
           }
           // step ticks: one lit tick per completed step (capped at 12)
           if (num(C.stepTicks, 0) >= 0.5) {
-            const n = 12, stepNow = Math.max(0, Math.round(liveNumber('step')));
+            const n = 12, stepNow = Math.max(0, Math.round(liveNumber('stepsDone')));
             const RT = R * 0.8, a0 = Math.PI * 0.62, a1 = Math.PI * 1.38;
             for (let i = 0; i < n; i++) {
               const a = a0 + (a1 - a0) * (i / (n - 1));
@@ -2052,8 +2149,12 @@ window.__ModuleLoader__.load({
             S.restore();
           }
           S.restore();
-          // error wash: additive red over the whole frame, under a second
-          if (errT >= 0) {
+          // error wash: additive red over the whole frame, under a second. Default OFF
+          // (errFx default 0) because a failed tool is the most frequent event in an
+          // agent loop; a full-frame flash is the loudest channel we have and using it
+          // here made it worthless. errPin is the replacement: a persistent mark at the
+          // failed tool's own angle.
+          if (errT >= 0 && num(C.errFx, 0) >= 0.5) {
             const k = Math.sin(Math.PI * Math.min(1, errT / 0.9));
             S.globalCompositeOperation = 'lighter';
             S.fillStyle = 'rgba(255,70,60,' + (0.05 * k) + ')';
@@ -2063,6 +2164,106 @@ window.__ModuleLoader__.load({
         }
         function countParticles() {
           return runners.length + comets.length + pulses.length + hazes.length + flares.length + flyers.length + bokehs.length;
+        }
+
+        /* ---------- v0.7.0: phase ring, error pins, tps ribbon (all switchable) ----------
+           The point of these three: the field can say WHAT the agent is doing, not just
+           HOW bright it is. Four states used to look identical (waiting / thinking /
+           streaming / running a tool), and the only "loud" channel (a full-frame red
+           wash) was fired by the most frequent event of all (a failed tool). */
+        /** -1 unknown, 0 waiting, 1 thinking, 2 streaming text, 3 running a tool */
+        function phaseNow() {
+          if (!live) return 0;
+          // stamps are taken on the ENGINE's clock when a signal flips, so the phase
+          // does not depend on which time source the adapter happened to use
+          const recent = (at) => T - at < 2.6;
+          const tools = Array.isArray(live.tools) ? live.tools : [];
+          let runningTool = false;
+          for (let i = tools.length - 1; i >= 0 && i > tools.length - 8; i--) {
+            if (tools[i] && String(tools[i].state) === 'running') { runningTool = true; break; }
+          }
+          if (runningTool || recent(phaseAt.tool)) return 3;
+          if (live.streaming === true && recent(phaseAt.stream)) return 2;
+          if (live.thinking === true && recent(phaseAt.think)) return 1;
+          return 0;
+        }
+        /** watch the adapter's phase signals and stamp them with the engine clock */
+        function updatePhase() {
+          const think = !!(live && live.thinking === true);
+          const stream = !!(live && live.streaming === true);
+          const toolAt = live ? Number(live.lastToolAt) || 0 : 0;
+          if (think !== phaseSeen.think) { phaseSeen.think = think; if (think) phaseAt.think = T; }
+          if (stream !== phaseSeen.stream) { phaseSeen.stream = stream; if (stream) phaseAt.stream = T; }
+          if (toolAt !== phaseSeen.toolAt) { phaseSeen.toolAt = toolAt; if (toolAt) phaseAt.tool = T; }
+        }
+        function drawPhaseRing() {
+          if (num(C.phaseRing, 0) < 0.5) return;
+          const ph = phaseNow();
+          const RA = R * 0.86;
+          S.save(); S.translate(cx, cy);
+          // the phase signature is MOTION, not colour: each phase has its own rhythm
+          const a0 = -Math.PI / 2;
+          if (ph === 1) {
+            // thinking: a slow breathing arc (no progress implied)
+            const k = 0.25 + 0.2 * Math.sin(T * 2.2);
+            S.strokeStyle = 'rgba(180,200,255,' + k.toFixed(3) + ')';
+            S.lineWidth = 2.4;
+            S.beginPath(); S.arc(0, 0, RA, a0 - 0.6, a0 + 0.6); S.stroke();
+          } else if (ph === 2) {
+            // streaming: a short comet arc running clockwise
+            const u = (T * 0.55) % 1;
+            const head = a0 + u * TAU, tail = head - 0.5;
+            S.strokeStyle = 'rgba(150,225,255,.6)'; S.lineWidth = 2.6;
+            S.beginPath(); S.arc(0, 0, RA, tail, head); S.stroke();
+            S.fillStyle = 'rgba(200,240,255,.85)';
+            S.beginPath(); S.arc(Math.cos(head) * RA, Math.sin(head) * RA, 2.2, 0, TAU); S.fill();
+          } else if (ph === 3) {
+            // tool running: a fast dashed sweep (clearly busier than streaming)
+            S.strokeStyle = 'rgba(255,214,150,.55)'; S.lineWidth = 2.2;
+            S.setLineDash([4, 9]);
+            S.lineDashOffset = -T * 60;
+            S.beginPath(); S.arc(0, 0, RA, 0, TAU); S.stroke();
+            S.setLineDash([]); S.lineDashOffset = 0;
+          }
+          S.restore();
+        }
+        function drawErrPins() {
+          if (num(C.errPin, 0) < 0.5) return;
+          const tools = live && Array.isArray(live.tools) ? live.tools : [];
+          if (!tools.length) return;
+          S.save(); S.translate(cx, cy);
+          for (let i = Math.max(0, tools.length - 8); i < tools.length; i++) {
+            const t = tools[i];
+            if (!t || String(t.state) !== 'error') continue;
+            const name = String(t.name || '');
+            let h0 = 0;
+            for (let k = 0; k < name.length; k++) h0 = (h0 * 31 + name.charCodeAt(k)) | 0;
+            const a = (Math.abs(h0) % 1000) / 1000 * TAU;
+            const rr0 = R + 10, x = Math.cos(a) * rr0, y = Math.sin(a) * rr0;
+            S.strokeStyle = 'rgba(255,120,110,.8)'; S.lineWidth = 1.6;
+            S.beginPath(); S.moveTo(x - 3, y - 3); S.lineTo(x + 3, y + 3);
+            S.moveTo(x + 3, y - 3); S.lineTo(x - 3, y + 3); S.stroke();
+          }
+          S.restore();
+        }
+        function drawTpsRibbon() {
+          if (num(C.tpsRibbon, 0) < 0.5) return;
+          const tps = liveNumber('tps');
+          if (!(tps > 0)) return;
+          // length is RELATIVE to this session's own median, so a slow model is not
+          // permanently shown as "nothing happening"
+          tpsHist.push(tps);
+          if (tpsHist.length > 600) tpsHist.shift();
+          const sorted = tpsHist.slice().sort((a, b) => a - b);
+          const med = sorted[sorted.length >> 1] || tps;
+          const k = clamp(tps / Math.max(1, med * 2), 0, 1);
+          const RA = R * 0.92, a0 = -Math.PI * 0.72, span = 0.42;
+          S.save(); S.translate(cx, cy);
+          S.strokeStyle = 'rgba(150,225,255,.18)'; S.lineWidth = 3;
+          S.beginPath(); S.arc(0, 0, RA, a0 - span, a0 + span); S.stroke();
+          S.strokeStyle = 'rgba(160,235,255,.7)'; S.lineWidth = 3;
+          S.beginPath(); S.arc(0, 0, RA, a0 - span, a0 - span + 2 * span * k); S.stroke();
+          S.restore();
         }
         function statsTick(dt) {
           frames++; fpsT += dt; statT += dt;
@@ -2082,9 +2283,17 @@ window.__ModuleLoader__.load({
           updateSpin(dt);
           updateSwitch(dt);
           updateGauges(dt);
+          updatePhase();
+          updateQuality(dt);
           statsTick(dt);
           if (!ready || disposed) return;
           applyRebuilds();
+          // idle sleep: park the loop entirely after idleSleepMs without interaction.
+          // One frame is still drawn on the way in so the canvas does not freeze mid-motion.
+          if (asleep) {
+            if (!painted) { drawStage(dt); painted = true; }
+            return;
+          }
           // mo = 0 (void state) → the loop parks; one final frame clears the canvas first
           if (mo === 0 && !dirty && !painted) return;
           painted = mo > 0;
@@ -2167,6 +2376,9 @@ window.__ModuleLoader__.load({
               : (sessRunning ? clamp(num(C.runLevel, 1), 0.2, 2) : clamp(num(C.idleMotion, 0), 0, 1)),
             build: bld, activity: act, spinning: !!spin, loopRunning: running,
             guard: guardHit,
+            quality: { level: qualLevel, fps: Math.round(qualFps * 10) / 10 },
+            asleep,
+            phase: phaseNow(),
             cam: { x: cam.x, y: cam.y, z: cam.z },
           };
         }
@@ -2180,6 +2392,7 @@ window.__ModuleLoader__.load({
           webLayers = [];
           release(trailC); trailC = null;
           release(glowC); glowC = null;
+          release(glowB); glowB = null;
           release(laneC); laneC = null;
           release(farC); farC = null;
           release(frameC); frameC = null;
@@ -2204,6 +2417,8 @@ window.__ModuleLoader__.load({
           debug,
           /* introspection for diagnostics / tests */
           isRunning: () => running,
+          /** host pushes "ms since the user last interacted" (idleSleepMs) */
+          setIdle,
           activity: () => act,
         };
       }
@@ -2574,6 +2789,21 @@ window.__ModuleLoader__.load({
         contextLimit: 0,
         turn: 0,
         step: 0,
+        /* phase signals for the phase ring (see engine.js): a turn-internal step
+           counter plus "text is streaming" / "reasoning is streaming" timestamps.
+           stepsDone counts completed steps across the whole session and is what the
+           step ticks read; live.step stays the turn-internal sequence number. */
+        stepsDone: 0,
+        turnStep: 0,
+        /* phase signals for the phase ring (engine.js): "text is streaming" /
+           "reasoning is streaming" timestamps, and the interrupt flag */
+        streaming: false,
+        streamAt: 0,
+        thinking: false,
+        thinkAt: 0,
+        reasonChars: 0,
+        interrupted: false,
+        lastToolAt: 0,
         model: '',
         sessionTitle: '',
         tools: [],
@@ -2776,11 +3006,15 @@ window.__ModuleLoader__.load({
           t: at,
         };
         live.tools.push(entry);
+        live.lastToolAt = at;
         if (live.tools.length > TOOLS_MAX) live.tools.splice(0, live.tools.length - TOOLS_MAX);
         return entry;
       }
 
       /* ---------------- durable events ---------------- */
+
+      /** (turn:step) of the last step already counted into live.stepsDone */
+      let lastCountedStep = '';
 
       function applyDurable(event, quiet) {
         const type = event && event.type;
@@ -2789,13 +3023,20 @@ window.__ModuleLoader__.load({
           case 'turn/start': {
             const turn = num(data.turn);
             if (turn !== undefined) live.turn = turn;
+            // a new turn starts a fresh step sequence; the session-wide counter keeps going
+            live.turnStep = 0;
+            live.streaming = false;
+            live.thinking = false;
             break;
           }
           case 'turn/end': {
             const turn = num(data.turn);
             if (turn !== undefined) live.turn = turn;
+            const kind = reasonKind(data.reason);
+            live.interrupted = kind === 'interrupted' || kind === 'aborted' || kind === 'cancelled';
+            live.streaming = false;
+            live.thinking = false;
             if (!quiet) {
-              const kind = reasonKind(data.reason);
               pushFeed(kind === 'error' ? 'error' : 'turn', 'turn ' + live.turn + ' ' + kind);
             }
             break;
@@ -2806,6 +3047,15 @@ window.__ModuleLoader__.load({
             const step = num(data.step);
             if (turn !== undefined) live.turn = turn;
             if (step !== undefined) live.step = step;
+            // stepsDone is cumulative for the session; step/end bumps it once per
+            // (turn, step) pair, so a replayed event never inflates the count
+            if (type === 'step/end' && step !== undefined && !quiet) {
+              const key = (turn === undefined ? live.turn : turn) + ':' + step;
+              if (key !== lastCountedStep) {
+                lastCountedStep = key;
+                live.stepsDone += 1;
+              }
+            }
             break;
           }
           case 'user/message': {
@@ -2875,16 +3125,26 @@ window.__ModuleLoader__.load({
       function handleChunk(chunk, data) {
         switch (chunk.type) {
           case 'text-delta':
+            live.streaming = true;
+            live.streamAt = now();
             emitText(chunk.text);
             break;
+          case 'reasoning-delta':
+            // reasoning used to be dropped on the floor; a timestamp is enough for the
+            // phase ring to tell "thinking" apart from "waiting" (no text is kept)
+            live.thinking = true;
+            live.thinkAt = now();
+            live.reasonChars += typeof chunk.text === 'string' ? chunk.text.length : 0;
+            break;
           case 'tool-call-delta':
+            live.streaming = false;
             upsertTool(chunk.id, typeof chunk.name === 'string' ? chunk.name : undefined, 'running');
             break;
           case 'usage':
             applyUsage(chunk.usage);
             break;
           default:
-            break;   // reasoning-delta / block-start / block-end / finish: not display tokens
+            break;   // block-start / block-end / finish: no display semantics
         }
         const turn = num(data.turn);
         const step = num(data.step);
@@ -3077,6 +3337,16 @@ window.__ModuleLoader__.load({
         live.contextLimit = 0;
         live.turn = 0;
         live.step = 0;
+        live.stepsDone = 0;
+        live.turnStep = 0;
+        live.streaming = false;
+        live.streamAt = 0;
+        live.thinking = false;
+        live.thinkAt = 0;
+        live.reasonChars = 0;
+        live.interrupted = false;
+        live.lastToolAt = 0;
+        lastCountedStep = '';
         live.model = '';
         live.sessionTitle = '';
         live.tps = 0;
@@ -3289,7 +3559,11 @@ window.__ModuleLoader__.load({
         // v0.4.0 layer separation (mirrors engine BASE)
         fieldBlur: 0, ringData: 1, guardOn: 1, guardStrength: 0.4, guardRadius: 0.9, guardColW: 0, plateAlpha: 0.72,
         fieldBright: 1, guardBlur: 0, motionQuiet: 0, readFade: 0,
-        tintAmount: 0, tintHue: 210, tintSat: 1.6,
+        tintAmount: 0, tintHue: 210, tintSat: 1.6, tintFollow: 0,
+        ctxArc: 1, toolBeam: 1, errFx: 0, stepTicks: 1,
+        hudScale: 1, hudInset: 12, hudTop: 6,
+        phaseRing: 1, errPin: 1, tpsRibbon: 1, thinkPulse: 1,
+        glowBlurSmall: 1, adaptQuality: 1, idleSleepMs: 0, hudFadeMs: 0,
       };
 
       /* ------------------------------------------------------------------ *
@@ -4485,6 +4759,8 @@ window.__ModuleLoader__.load({
         const [stats, setStats] = React.useState(null);
         const [liveTick, setLiveTick] = React.useState(0);
         const [reading, setReading] = React.useState(false);
+        /** last time a HUD tick was pushed (hudFadeMs throttling) */
+        const lastHudPush = React.useRef(0);
 
         const patchParams = React.useCallback((partial) => { HalofluxState.set(partial); }, []);
 
@@ -4502,7 +4778,16 @@ window.__ModuleLoader__.load({
           liveRef.current = live;
           // presence must be right before the first frame, not one effect later
           try { live.sessionPresent = sessionRef.current !== undefined; } catch { /* readonly */ }
-          const off = live.subscribe(() => setLiveTick((n) => (n + 1) % 1000000));
+          const off = live.subscribe(() => {
+            // hudFadeMs throttles HUD re-renders independently of the engine's frame rate
+            const gap = Number(params.hudFadeMs) || 0;
+            if (gap > 0) {
+              const t = Date.now();
+              if (t - lastHudPush.current < gap) return;
+              lastHudPush.current = t;
+            }
+            setLiveTick((n) => (n + 1) % 1000000);
+          });
           try { if (typeof window !== 'undefined' && window.__HFX_DEBUG) window.__hfx = { live: live, engine: () => engineRef.current }; } catch { /* debug hook */ }
           return () => { off(); live.dispose(); liveRef.current = null; };
         }, []);
@@ -4640,15 +4925,25 @@ window.__ModuleLoader__.load({
           return () => window.removeEventListener('keydown', onKey);
         }, [params.hudOn, patchParams]);
 
-        /* readFade: interact → the field steps back, 2.5s idle → it comes back.
-           Only wheel/scroll/keys, so passive viewing keeps the full look. */
+        /* idleSleepMs: after N ms without interaction the engine parks entirely.
+           One shared interaction clock drives both this and readFade. */
         React.useEffect(() => {
-          if (!(Number(params.readFade) >= 0.5)) { setReading(false); return undefined; }
+          const sleepOn = Number(params.idleSleepMs) > 0;
+          const fadeOn = Number(params.readFade) >= 0.5;
+          if (!sleepOn && !fadeOn) {
+            setReading(false);
+            if (engineRef.current && typeof engineRef.current.setIdle === 'function') engineRef.current.setIdle(0);
+            return undefined;
+          }
+          let lastAt = Date.now();
           let timer = 0;
           const bump = () => {
-            setReading(true);
-            if (timer) clearTimeout(timer);
-            timer = setTimeout(() => { timer = 0; setReading(false); }, 2500);
+            lastAt = Date.now();
+            if (fadeOn) {
+              setReading(true);
+              if (timer) clearTimeout(timer);
+              timer = setTimeout(() => { timer = 0; setReading(false); }, 2500);
+            }
           };
           const passive = { passive: true };
           const capture = { passive: true, capture: true };
@@ -4656,14 +4951,21 @@ window.__ModuleLoader__.load({
           window.addEventListener('scroll', bump, capture);
           window.addEventListener('keydown', bump, passive);
           window.addEventListener('mousedown', bump, passive);
+          window.addEventListener('pointermove', bump, passive);
+          const poll = setInterval(() => {
+            const engine = engineRef.current;
+            if (engine && typeof engine.setIdle === 'function') engine.setIdle(Date.now() - lastAt);
+          }, 1000);
           return () => {
             if (timer) clearTimeout(timer);
+            clearInterval(poll);
             window.removeEventListener('wheel', bump, passive);
             window.removeEventListener('scroll', bump, capture);
             window.removeEventListener('keydown', bump, passive);
             window.removeEventListener('mousedown', bump, passive);
+            window.removeEventListener('pointermove', bump, passive);
           };
-        }, [params.readFade]);
+        }, [params.readFade, params.idleSleepMs]);
 
         const blendMode = ['screen', 'lighten', 'normal'][params.blend | 0] || 'screen';
         // readFade: while the user scrolls/types the field recedes, then returns on idle
@@ -4785,7 +5087,8 @@ window.__ModuleLoader__.load({
             },
           }),
           hudVisible && HalofluxHud && live ? h(HalofluxHud.Stats, { ...hudProps, liveTick }) : null,
-          hudVisible && HalofluxHud && live ? h(HalofluxHud.Feed, { ...hudProps, liveTick }) : null,
+          hudVisible && HalofluxHud && live && Number(params.feedOn) >= 0.5
+            ? h(HalofluxHud.Feed, { ...hudProps, liveTick }) : null,
           hudVisible && HalofluxHud && live ? h(HalofluxHud.Tools, { ...hudProps, liveTick }) : null,
           HalofluxHud && live ? h(HalofluxHud.Console, { ...hudProps, liveTick }) : null,
         );

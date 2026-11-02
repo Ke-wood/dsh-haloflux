@@ -222,6 +222,21 @@ const createHalofluxLive = (opts) => {
     contextLimit: 0,
     turn: 0,
     step: 0,
+    /* phase signals for the phase ring (see engine.js): a turn-internal step
+       counter plus "text is streaming" / "reasoning is streaming" timestamps.
+       stepsDone counts completed steps across the whole session and is what the
+       step ticks read; live.step stays the turn-internal sequence number. */
+    stepsDone: 0,
+    turnStep: 0,
+    /* phase signals for the phase ring (engine.js): "text is streaming" /
+       "reasoning is streaming" timestamps, and the interrupt flag */
+    streaming: false,
+    streamAt: 0,
+    thinking: false,
+    thinkAt: 0,
+    reasonChars: 0,
+    interrupted: false,
+    lastToolAt: 0,
     model: '',
     sessionTitle: '',
     tools: [],
@@ -424,11 +439,15 @@ const createHalofluxLive = (opts) => {
       t: at,
     };
     live.tools.push(entry);
+    live.lastToolAt = at;
     if (live.tools.length > TOOLS_MAX) live.tools.splice(0, live.tools.length - TOOLS_MAX);
     return entry;
   }
 
   /* ---------------- durable events ---------------- */
+
+  /** (turn:step) of the last step already counted into live.stepsDone */
+  let lastCountedStep = '';
 
   function applyDurable(event, quiet) {
     const type = event && event.type;
@@ -437,13 +456,20 @@ const createHalofluxLive = (opts) => {
       case 'turn/start': {
         const turn = num(data.turn);
         if (turn !== undefined) live.turn = turn;
+        // a new turn starts a fresh step sequence; the session-wide counter keeps going
+        live.turnStep = 0;
+        live.streaming = false;
+        live.thinking = false;
         break;
       }
       case 'turn/end': {
         const turn = num(data.turn);
         if (turn !== undefined) live.turn = turn;
+        const kind = reasonKind(data.reason);
+        live.interrupted = kind === 'interrupted' || kind === 'aborted' || kind === 'cancelled';
+        live.streaming = false;
+        live.thinking = false;
         if (!quiet) {
-          const kind = reasonKind(data.reason);
           pushFeed(kind === 'error' ? 'error' : 'turn', 'turn ' + live.turn + ' ' + kind);
         }
         break;
@@ -454,6 +480,15 @@ const createHalofluxLive = (opts) => {
         const step = num(data.step);
         if (turn !== undefined) live.turn = turn;
         if (step !== undefined) live.step = step;
+        // stepsDone is cumulative for the session; step/end bumps it once per
+        // (turn, step) pair, so a replayed event never inflates the count
+        if (type === 'step/end' && step !== undefined && !quiet) {
+          const key = (turn === undefined ? live.turn : turn) + ':' + step;
+          if (key !== lastCountedStep) {
+            lastCountedStep = key;
+            live.stepsDone += 1;
+          }
+        }
         break;
       }
       case 'user/message': {
@@ -523,16 +558,26 @@ const createHalofluxLive = (opts) => {
   function handleChunk(chunk, data) {
     switch (chunk.type) {
       case 'text-delta':
+        live.streaming = true;
+        live.streamAt = now();
         emitText(chunk.text);
         break;
+      case 'reasoning-delta':
+        // reasoning used to be dropped on the floor; a timestamp is enough for the
+        // phase ring to tell "thinking" apart from "waiting" (no text is kept)
+        live.thinking = true;
+        live.thinkAt = now();
+        live.reasonChars += typeof chunk.text === 'string' ? chunk.text.length : 0;
+        break;
       case 'tool-call-delta':
+        live.streaming = false;
         upsertTool(chunk.id, typeof chunk.name === 'string' ? chunk.name : undefined, 'running');
         break;
       case 'usage':
         applyUsage(chunk.usage);
         break;
       default:
-        break;   // reasoning-delta / block-start / block-end / finish: not display tokens
+        break;   // block-start / block-end / finish: no display semantics
     }
     const turn = num(data.turn);
     const step = num(data.step);
@@ -725,6 +770,16 @@ const createHalofluxLive = (opts) => {
     live.contextLimit = 0;
     live.turn = 0;
     live.step = 0;
+    live.stepsDone = 0;
+    live.turnStep = 0;
+    live.streaming = false;
+    live.streamAt = 0;
+    live.thinking = false;
+    live.thinkAt = 0;
+    live.reasonChars = 0;
+    live.interrupted = false;
+    live.lastToolAt = 0;
+    lastCountedStep = '';
     live.model = '';
     live.sessionTitle = '';
     live.tps = 0;
